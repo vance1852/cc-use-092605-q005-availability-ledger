@@ -31,10 +31,16 @@ from .storage import initialize, transaction
 
 
 ROLE_PERMISSIONS = {
-    "planner": {"quote.write", "catalog.write", "scenario.write", "scenario.run"},
-    "dispatcher": {"nomination.write", "allocation.run", "transfer.write", "inventory.write"},
-    "risk": {"outage.write", "scenario.approve", "report.read"},
-    "auditor": {"report.read", "audit.read"},
+    "planner": {
+        "quote.write", "catalog.write", "scenario.write", "scenario.run",
+        "entitlement.grant", "period.close", "overage.review", "ledger.read",
+    },
+    "dispatcher": {
+        "nomination.write", "allocation.run", "transfer.write", "inventory.write",
+        "plan.write", "ledger.read",
+    },
+    "risk": {"outage.write", "scenario.approve", "report.read", "overage.review", "ledger.read"},
+    "auditor": {"report.read", "audit.read", "ledger.read"},
 }
 
 

@@ -194,6 +194,152 @@ CREATE TABLE IF NOT EXISTS supply_audit_events (
 
 CREATE INDEX IF NOT EXISTS idx_supply_audit_entity
 ON supply_audit_events(entity_type, entity_id, event_id);
+
+CREATE TABLE IF NOT EXISTS entitlements (
+    entitlement_id TEXT PRIMARY KEY,
+    facility_id TEXT NOT NULL REFERENCES facilities(facility_id),
+    product TEXT NOT NULL,
+    grant_type TEXT NOT NULL
+        CHECK(grant_type IN ('GUARANTEED_VOLUME','MAINTENANCE_EXEMPT','CAPACITY_COMPENSATION','OVERAGE_EXCEPTION')),
+    quantity_mwh TEXT NOT NULL,
+    held_mwh TEXT NOT NULL DEFAULT '0',
+    consumed_mwh TEXT NOT NULL DEFAULT '0',
+    expired_mwh TEXT NOT NULL DEFAULT '0',
+    applicable_from TEXT NOT NULL,
+    applicable_to TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','expired','closed')),
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT NOT NULL REFERENCES supply_users(user_id),
+    created_at TEXT NOT NULL,
+    CHECK(CAST(quantity_mwh AS REAL) > 0),
+    CHECK(applicable_to >= applicable_from),
+    CHECK(expires_at >= applicable_to)
+);
+
+CREATE INDEX IF NOT EXISTS idx_entitlements_account
+ON entitlements(facility_id, product, expires_at);
+
+CREATE TABLE IF NOT EXISTS entitlement_entries (
+    entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    facility_id TEXT NOT NULL,
+    product TEXT NOT NULL,
+    entitlement_id TEXT NOT NULL REFERENCES entitlements(entitlement_id),
+    action TEXT NOT NULL
+        CHECK(action IN ('GRANT','HOLD','RELEASE','WRITE_OFF','RETURN','EXPIRE')),
+    amount_mwh TEXT NOT NULL,
+    plan_id TEXT,
+    segment_key TEXT,
+    period_key TEXT,
+    reason_code TEXT NOT NULL DEFAULT '',
+    source_ref TEXT NOT NULL DEFAULT '',
+    actor_id TEXT NOT NULL REFERENCES supply_users(user_id),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ent_entries_account
+ON entitlement_entries(facility_id, product, entitlement_id, entry_id);
+
+CREATE INDEX IF NOT EXISTS idx_ent_entries_plan
+ON entitlement_entries(plan_id, segment_key, entry_id);
+
+CREATE TABLE IF NOT EXISTS delivery_plans (
+    plan_id TEXT PRIMARY KEY,
+    route_id TEXT NOT NULL REFERENCES routes(route_id),
+    facility_id TEXT NOT NULL REFERENCES facilities(facility_id),
+    product TEXT NOT NULL,
+    starts_at TEXT NOT NULL,
+    ends_at TEXT NOT NULL,
+    quantity_mwh TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'draft'
+        CHECK(state IN ('draft','pending_review','confirmed','partially_settled','settled','cancelled','failed')),
+    revision INTEGER NOT NULL DEFAULT 1,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    submitted_by TEXT NOT NULL REFERENCES supply_users(user_id),
+    submitted_at TEXT NOT NULL,
+    confirmed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_plans_facility
+ON delivery_plans(facility_id, state, starts_at);
+
+CREATE TABLE IF NOT EXISTS delivery_plan_segments (
+    segment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id TEXT NOT NULL REFERENCES delivery_plans(plan_id),
+    period_key TEXT NOT NULL,
+    starts_at TEXT NOT NULL,
+    ends_at TEXT NOT NULL,
+    quantity_mwh TEXT NOT NULL,
+    held_mwh TEXT NOT NULL DEFAULT '0',
+    overage_mwh TEXT NOT NULL DEFAULT '0',
+    actual_mwh TEXT NOT NULL DEFAULT '0',
+    state TEXT NOT NULL DEFAULT 'proposed'
+        CHECK(state IN ('proposed','held','settled','returned','failed')),
+    revision INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(plan_id, period_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_segments_period
+ON delivery_plan_segments(period_key, state);
+
+CREATE TABLE IF NOT EXISTS entitlement_holds (
+    hold_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entitlement_id TEXT NOT NULL REFERENCES entitlements(entitlement_id),
+    plan_id TEXT NOT NULL REFERENCES delivery_plans(plan_id),
+    segment_key TEXT NOT NULL,
+    amount_mwh TEXT NOT NULL,
+    consumed_mwh TEXT NOT NULL DEFAULT '0',
+    state TEXT NOT NULL DEFAULT 'held' CHECK(state IN ('held','consumed','released')),
+    created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_holds_active
+ON entitlement_holds(entitlement_id, plan_id, segment_key) WHERE state!='released';
+
+CREATE TABLE IF NOT EXISTS route_reservations (
+    reservation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    route_id TEXT NOT NULL REFERENCES routes(route_id),
+    service_date TEXT NOT NULL,
+    plan_id TEXT NOT NULL REFERENCES delivery_plans(plan_id),
+    segment_key TEXT NOT NULL,
+    reserved_mwh TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'held' CHECK(state IN ('held','released','consumed')),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reservations_route_date
+ON route_reservations(route_id, service_date, state);
+
+CREATE TABLE IF NOT EXISTS overage_reviews (
+    review_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id TEXT NOT NULL REFERENCES delivery_plans(plan_id),
+    period_key TEXT NOT NULL,
+    shortfall_mwh TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending'
+        CHECK(state IN ('pending','approved','rejected','expired')),
+    submitted_by TEXT NOT NULL REFERENCES supply_users(user_id),
+    submitted_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    reviewed_by TEXT REFERENCES supply_users(user_id),
+    reviewed_at TEXT,
+    decision_note TEXT NOT NULL DEFAULT ''
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_overage_pending
+ON overage_reviews(plan_id, period_key) WHERE state='pending';
+
+CREATE INDEX IF NOT EXISTS idx_overage_reviewer
+ON overage_reviews(state, expires_at);
+
+CREATE TABLE IF NOT EXISTS settlement_periods (
+    period_key TEXT PRIMARY KEY,
+    state TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open','closed')),
+    closed_by TEXT REFERENCES supply_users(user_id),
+    closed_at TEXT
+);
 """
 
 

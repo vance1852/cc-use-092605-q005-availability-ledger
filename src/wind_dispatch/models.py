@@ -16,6 +16,7 @@ IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{1,63}$")
 POWER_PRICE_INDEXES = {"PEAK_VALLEY", "MARKET_SETTLED", "GRID_COMMITTED", "DAY_AHEAD", "REGULATED", "CUSTOM"}
 PRODUCTS = {"turbine-18mw", "turbine-16mw", "turbine-14mw", "reactive-compensator", "subsea-cable", "maintenance-vessel"}
 ROUTE_KINDS = {"export-corridor", "offshore-station", "station", "storage", "compensation-station"}
+GRANT_TYPES = {"GUARANTEED_VOLUME", "MAINTENANCE_EXEMPT", "CAPACITY_COMPENSATION", "OVERAGE_EXCEPTION"}
 
 
 def required_text(value: object, field: str, maximum: int = 256) -> str:
@@ -259,4 +260,61 @@ class SupplyScenario:
             ),
             route_capacity_changes=parsed_routes,
             demand_changes=parsed_demand,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class EntitlementGrant:
+    entitlement_id: str
+    facility_id: str
+    product: str
+    grant_type: str
+    quantity_mwh: Decimal
+    applicable_from: str
+    applicable_to: str
+    expires_at: str
+    source_ref: str
+    note: str
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "EntitlementGrant":
+        grant_type = required_text(raw.get("grant_type"), "grant_type", 32)
+        if grant_type not in GRANT_TYPES:
+            raise ValidationFailed("grant_type 必须是保障性电量、检修免责或容量补偿")
+        return cls(
+            entitlement_id=identifier(raw.get("entitlement_id"), "entitlement_id"),
+            facility_id=identifier(raw.get("facility_id"), "facility_id"),
+            product=required_text(raw.get("product"), "product", 32),
+            grant_type=grant_type,
+            quantity_mwh=decimal_value(
+                raw.get("quantity_mwh"), "quantity_mwh", minimum=Decimal("0.001")
+            ),
+            applicable_from=required_text(raw.get("applicable_from"), "applicable_from", 40),
+            applicable_to=required_text(raw.get("applicable_to"), "applicable_to", 40),
+            expires_at=required_text(raw.get("expires_at"), "expires_at", 40),
+            source_ref=identifier(raw.get("source_ref"), "source_ref"),
+            note=str(raw.get("note", "") or "")[:512],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryPlanDraft:
+    plan_id: str
+    route_id: str
+    starts_at: str
+    ends_at: str
+    quantity_mwh: Decimal
+    idempotency_key: str
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "DeliveryPlanDraft":
+        return cls(
+            plan_id=identifier(raw.get("plan_id"), "plan_id"),
+            route_id=identifier(raw.get("route_id"), "route_id"),
+            starts_at=required_text(raw.get("starts_at"), "starts_at", 40),
+            ends_at=required_text(raw.get("ends_at"), "ends_at", 40),
+            quantity_mwh=decimal_value(
+                raw.get("quantity_mwh"), "quantity_mwh", minimum=Decimal("0.001")
+            ),
+            idempotency_key=identifier(raw.get("idempotency_key"), "idempotency_key"),
         )

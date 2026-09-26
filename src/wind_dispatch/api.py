@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from urllib.parse import parse_qs, urlparse
 
 from .errors import SupplyError, ValidationFailed
+from .entitlements import EntitlementService
 from .service import SupplyService
 from .storage import connect
 
@@ -85,6 +86,39 @@ class JsonApplication:
                 return Response(200, self.service.run_scenario(actor, parts[1], payload["as_of_date"]))
             if method == "GET" and path == "/audit/chain":
                 return Response(200, self.service.audit_chain(actor))
+            # ---- 可用率权益账本 ----
+            if method == "POST" and path == "/entitlements":
+                return Response(201, self.service.grant_entitlement(actor, payload))
+            if method == "GET" and path == "/entitlements":
+                return Response(200, self.service.account_summary(
+                    actor, query.get("facility_id", [""])[0], query.get("product", [None])[0]))
+            if method == "GET" and len(parts) == 2 and parts[0] == "entitlements":
+                return Response(200, self.service.entitlement_detail(actor, parts[1]))
+            if method == "POST" and path == "/plans":
+                return Response(201, self.service.create_plan(actor, payload))
+            if method == "GET" and len(parts) == 2 and parts[0] == "plans":
+                return Response(200, self.service.plan_detail(actor, parts[1]))
+            if method == "POST" and len(parts) == 3 and parts[0] == "plans" and parts[2] == "confirm":
+                return Response(200, self.service.confirm_plan(actor, parts[1], int(payload["expected_revision"])))
+            if method == "POST" and len(parts) == 3 and parts[0] == "plans" and parts[2] == "overage":
+                return Response(201, self.service.submit_overage_review(actor, parts[1], payload["reason"]))
+            if method == "POST" and len(parts) == 3 and parts[0] == "plans" and parts[2] == "deliveries":
+                return Response(201, self.service.record_delivery(
+                    actor, parts[1], payload["period_key"], payload["actual_mwh"]))
+            if method == "POST" and len(parts) == 3 and parts[0] == "plans" and parts[2] == "cancel":
+                return Response(200, self.service.cancel_plan(actor, parts[1], int(payload["expected_revision"])))
+            if method == "POST" and len(parts) == 3 and parts[0] == "plans" and parts[2] == "fail":
+                return Response(200, self.service.fail_plan(
+                    actor, parts[1], int(payload["expected_revision"]), payload["reason"]))
+            if method == "GET" and path == "/reviews/pending":
+                return Response(200, self.service.pending_reviews(actor))
+            if method == "POST" and len(parts) == 3 and parts[0] == "reviews" and parts[2] == "decision":
+                return Response(200, self.service.decide_overage_review(
+                    actor, int(parts[1]), bool(payload["approve"]), str(payload.get("note", ""))))
+            if method == "POST" and len(parts) == 3 and parts[0] == "settlement-periods" and parts[2] == "close":
+                return Response(200, self.service.close_period(actor, parts[1]))
+            if method == "GET" and path == "/role-view":
+                return Response(200, self.service.role_view(actor, query.get("facility_id", [None])[0]))
             return Response(404, {"error": {"code": "route_not_found", "message": "接口不存在"}})
         except SupplyError as exc:
             return Response(exc.status, {"error": {"code": exc.code, "message": str(exc)}})
@@ -126,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args(argv)
     connection = connect(args.database)
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(JsonApplication(SupplyService(connection))))
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(JsonApplication(EntitlementService(connection))))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

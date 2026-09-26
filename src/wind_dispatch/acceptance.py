@@ -9,13 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .clock import FrozenClock
-from .service import SupplyService
+from .entitlements import EntitlementService
 
 
 def run(workspace: Path) -> dict[str, object]:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     connection.row_factory = sqlite3.Row
-    service = SupplyService(connection, FrozenClock(datetime(2026, 9, 24, 8, 0, tzinfo=timezone.utc)))
+    service = EntitlementService(connection, FrozenClock(datetime(2026, 9, 24, 8, 0, tzinfo=timezone.utc)))
     for user_id, role in (("plan", "planner"), ("dispatch", "dispatcher"), ("risk", "risk"), ("audit", "auditor")):
         service.create_user(user_id, user_id, role)
     for index, close in enumerate(("108", "105", "102", "100", "98", "96"), start=18):
@@ -30,7 +30,46 @@ def run(workspace: Path) -> dict[str, object]:
     service.create_scenario("plan", {"scenario_id": "grid-recovery", "name": "关键机组检修恢复与需求回落", "market_index_drop_percent": "9", "route_capacity_changes": {"fanshi-export": "20"}, "demand_changes": {"fanshi-one:turbine-18mw": "-5"}})
     service.approve_scenario("risk", "grid-recovery", 1)
     scenario = service.run_scenario("plan", "grid-recovery", "2026-09-23")
-    result = {"status": "ok", "price": service.price_summary("PEAK_VALLEY"), "allocation_id": allocation["allocation_id"], "transfer": transfer, "scenario_run_id": scenario["run_id"], "audit": service.audit_chain("audit"), "workspace": workspace.name}
+
+    # 可用率权益账本：三类额度来源按场站与机组批次分户。
+    grant_window = {
+        "applicable_from": "2026-11-01T00:00:00Z",
+        "applicable_to": "2027-03-31T23:59:59Z",
+        "expires_at": "2027-04-15T23:59:59Z",
+    }
+    service.grant_entitlement("plan", {"entitlement_id": "ent-guaranteed", "facility_id": "fanshi-one", "product": "turbine-18mw", "grant_type": "GUARANTEED_VOLUME", "quantity_mwh": "80000", "source_ref": "guarantee-2027", "note": "保障性电量", **grant_window})
+    service.grant_entitlement("plan", {"entitlement_id": "ent-maintenance", "facility_id": "fanshi-one", "product": "turbine-18mw", "grant_type": "MAINTENANCE_EXEMPT", "quantity_mwh": "20000", "source_ref": "outage-waiver-2027", "note": "检修免责", **grant_window})
+    service.grant_entitlement("plan", {"entitlement_id": "ent-capacity", "facility_id": "fanshi-one", "product": "turbine-18mw", "grant_type": "CAPACITY_COMPENSATION", "quantity_mwh": "10000", "source_ref": "capacity-comp-2027", "note": "容量补偿", **grant_window})
+    cross_year = {"route_id": "fanshi-export", "starts_at": "2026-12-20T00:00:00Z", "ends_at": "2027-01-10T00:00:00Z"}
+    service.create_plan("dispatch", {"plan_id": "plan-cross-year", "quantity_mwh": "90000", "idempotency_key": "plan-key-001", **cross_year})
+    confirmed_plan = service.confirm_plan("dispatch", "plan-cross-year", 1)
+    # 额度不足的跨年计划进入限时复核：提交人不能审批自己的例外。
+    service.create_plan("dispatch", {"plan_id": "plan-overage", "quantity_mwh": "30000", "idempotency_key": "plan-key-002", **cross_year})
+    overage = service.submit_overage_review("dispatch", "plan-overage", "寒潮增发超出保障性额度")
+    for pending_review in overage["overage_reviews"]:
+        if pending_review["state"] == "pending":
+            overage = service.decide_overage_review("risk", pending_review["review_id"], True, "同意寒潮应急增供")
+    approved_plan = overage
+    # 登记实际电量形成核销，随后取消主计划，仅返还未形成实际电量的部分。
+    delivered_period = confirmed_plan["segments"][0]["period_key"]
+    service.record_delivery("dispatch", "plan-cross-year", delivered_period, "50000")
+    cross_year_revision = service.plan_detail("dispatch", "plan-cross-year")["revision"]
+    cancelled_plan = service.cancel_plan("dispatch", "plan-cross-year", cross_year_revision)
+    ledger_totals = service.account_summary("audit", "fanshi-one")["totals_by_product"]["turbine-18mw"]
+    role_views = {
+        "station": sorted(service.role_view("dispatch", facility_id="fanshi-one").keys()),
+        "operator": sorted(service.role_view("plan").keys()),
+        "auditor": sorted(service.role_view("audit").keys()),
+    }
+    result = {"status": "ok", "price": service.price_summary("PEAK_VALLEY"), "allocation_id": allocation["allocation_id"], "transfer": transfer, "scenario_run_id": scenario["run_id"],
+              "ledger": {"plan_periods": [segment["period_key"] for segment in confirmed_plan["segments"]],
+                         "cross_year_state": confirmed_plan["state"],
+                         "overage_state": approved_plan["state"],
+                         "cancelled_state": cancelled_plan["state"],
+                         "consumed_mwh": ledger_totals["consumed_mwh"],
+                         "returned_to_available_mwh": ledger_totals["available_mwh"],
+                         "role_views": role_views},
+              "audit": service.audit_chain("audit"), "workspace": workspace.name}
     connection.close()
     return result
 
